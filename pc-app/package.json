@@ -1,0 +1,66 @@
+{
+  "name": "nexus-pc-manager",
+  "version": "1.0.0",
+  "description": "NEXUS // DECK — Desktop Host & Launcher for Android Remote Control",
+  "author": "NEXUS",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev:ui": "vite --host 0.0.0.0 --port 5173",
+    "dev:server": "node dist-electron/standalone.js",
+    "build:ui": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:ui && npm run build:electron",
+    "dist:win": "npm run build && electron-builder --win portable"
+  },
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.1.0",
+    "@fontsource/manrope": "^5.1.0",
+    "@fontsource/unbounded": "^5.1.0",
+    "lucide-react": "^0.475.0",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@types/ws": "^8.5.14",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  },
+  "build": {
+    "appId": "com.nexusdeck.pc",
+    "productName": "NEXUS PC",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "build/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "NEXUS-PC-Windows.exe"
+    }
+  }
+}
