@@ -478,9 +478,10 @@ export async function startNexusServer(
     // ignore
   }
 
+  const bindHost = process.env.NEXUS_BIND_HOST || '0.0.0.0';
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, '0.0.0.0', () => resolve());
+    server.listen(port, bindHost, () => resolve());
   });
 
   return {
