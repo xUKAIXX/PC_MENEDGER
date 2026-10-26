@@ -10,6 +10,7 @@ import {
 } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFile } from 'child_process';
 import { extractLargestPngFromIco } from './icons';
 import { startNexusServer, NexusServerHandle } from './server';
 import { DeckStore } from './store';
@@ -24,8 +25,8 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (mainWindow) {
+  app.on('second-instance', (_event, argv) => {
+    if (!argv.includes('--hidden') && mainWindow) {
       if (!mainWindow.isVisible()) mainWindow.show();
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
@@ -112,11 +113,30 @@ function createElectronAdapter(): PlatformAdapter {
     setAutostart: (enabled: boolean): boolean => {
       if (process.platform !== 'win32' && process.platform !== 'darwin') return false;
       try {
+        const exePath = getStartupExePath();
         app.setLoginItemSettings({
           openAtLogin: enabled,
-          path: getStartupExePath(),
+          path: exePath,
           args: ['--hidden'],
         });
+        // Register zero-delay Task Scheduler entry on Windows to bypass Windows 11 startup delay
+        if (process.platform === 'win32') {
+          if (enabled) {
+            execFile(
+              'schtasks.exe',
+              ['/Create', '/TN', 'NEXUS_PC_Deck', '/TR', `"${exePath}" --hidden`, '/SC', 'ONLOGON', '/F'],
+              { windowsHide: true },
+              () => {}
+            );
+          } else {
+            execFile(
+              'schtasks.exe',
+              ['/Delete', '/TN', 'NEXUS_PC_Deck', '/F'],
+              { windowsHide: true },
+              () => {}
+            );
+          }
+        }
         return enabled;
       } catch {
         return false;

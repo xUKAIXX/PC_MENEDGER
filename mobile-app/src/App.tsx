@@ -210,16 +210,48 @@ export const App: React.FC = () => {
       }
     };
 
+    let failedPings = 0;
+    let searchingLan = false;
+
     const checkHttpStatus = async () => {
       if (disposed) return;
       try {
         const pingRes = await mobilePcApi.ping(activePc.ip, activePc.port);
         if (disposed) return;
+        failedPings = 0;
         setLatencyMs(pingRes.latencyMs);
         markOnlineAndUpdateProfile(pingRes.info);
       } catch {
-        if (!disposed) {
-          setIsOnline(false);
+        if (disposed) return;
+        setIsOnline(false);
+        failedPings += 1;
+
+        // Auto-heal IP if router reassigned DHCP IP after cold boot!
+        if (!searchingLan && failedPings % 3 === 0) {
+          searchingLan = true;
+          discoverPcsOnWifi(activePc.port)
+            .then((hosts) => {
+              if (disposed) return;
+              const matched = hosts.find(
+                (h) =>
+                  h.serverId === activePc.id ||
+                  (activePc.mac &&
+                    (h.mac === activePc.mac || h.macs?.includes(activePc.mac)))
+              );
+              if (matched && matched.ip && matched.ip !== activePc.ip) {
+                const updatedList = upsertSavedPc({
+                  ...activePc,
+                  ip: matched.ip,
+                  broadcastIp: matched.broadcastIp || activePc.broadcastIp,
+                  lastSeenAt: Date.now(),
+                });
+                setSavedPcs(updatedList);
+              }
+            })
+            .catch(() => {})
+            .finally(() => {
+              searchingLan = false;
+            });
         }
       }
     };
@@ -282,15 +314,27 @@ export const App: React.FC = () => {
     };
   }, [activePc?.id, activePc?.ip, activePc?.port, Boolean(wakingStartedAt)]);
 
-  // Boot radar timer counter
+  // Boot radar timer counter (up to 120s for slow BIOS / DDR5 cold boots + retry WoL at 7s)
   useEffect(() => {
     if (!wakingStartedAt) {
       setWakingElapsedSec(0);
       return;
     }
+    let resentOnce = false;
     const iv = window.setInterval(() => {
       const elapsed = Math.floor((Date.now() - wakingStartedAt) / 1000);
-      if (elapsed > 75) {
+      if (elapsed >= 7 && !resentOnce && activePc) {
+        resentOnce = true;
+        const macList = activePc.macs?.length
+          ? activePc.macs
+          : activePc.mac
+          ? [activePc.mac]
+          : [];
+        if (macList.length > 0) {
+          sendWakeOnLan(macList, activePc.broadcastIp).catch(() => {});
+        }
+      }
+      if (elapsed > 120) {
         setWakingStartedAt(null);
         setPendingWakeLaunchItem(null);
       } else {
@@ -298,7 +342,7 @@ export const App: React.FC = () => {
       }
     }, 500);
     return () => window.clearInterval(iv);
-  }, [wakingStartedAt]);
+  }, [wakingStartedAt, activePc]);
 
   const handlePaired = (profile: SavedPcProfile, syncedItems: DeckItem[]) => {
     const nextList = upsertSavedPc(profile);
