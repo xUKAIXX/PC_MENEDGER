@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+pc-app/dist/
+pc-app/dist-electron/
+pc-app/release/
+mobile-app/dist/
+
+# Android Gradle build artifacts (keep gradle-wrapper.jar!)
+mobile-app/android/.gradle/
+mobile-app/android/.idea/
+mobile-app/android/build/
+mobile-app/android/app/build/
+mobile-app/android/capacitor-cordova-android-plugins/build/
+mobile-app/android/local.properties
+*.keystore
+*.jks
+
+# Keep Gradle wrapper jar explicitly
+!mobile-app/android/gradle/wrapper/gradle-wrapper.jar
+
+# Logs & OS files
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.env
+.env.local
