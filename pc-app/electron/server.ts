@@ -385,7 +385,10 @@ export async function startNexusServer(
       }
 
       if (method === 'POST' && pathname === '/api/windows-setup') {
-        const setupRes = await runWindowsSystemSetup(port);
+        const setupRes = await runWindowsSystemSetup(port, process.execPath);
+        if (setupRes.ok) {
+          store.markFirewallConfigured();
+        }
         sendJson(res, 200, setupRes);
         return;
       }
@@ -473,7 +476,41 @@ export async function startNexusServer(
     // Non-fatal if UDP discovery port is already occupied
   });
   try {
-    udp.bind(port + 1, '0.0.0.0');
+    udp.bind(port + 1, '0.0.0.0', () => {
+      try {
+        udp.setBroadcast(true);
+        const announceBoot = () => {
+          const info = getPcInfo();
+          const payload = Buffer.from(
+            JSON.stringify({
+              magic: 'NEXUS_PC_V1',
+              serverId: info.serverId,
+              name: info.name,
+              hostname: info.hostname,
+              ip: info.primaryIp,
+              port: info.port,
+              mac: info.primaryMac,
+              macs: info.macs,
+              broadcastIp: info.broadcastIp,
+              pinRequired: info.pinRequired,
+            }),
+            'utf8'
+          );
+          const targets = new Set<string>(['255.255.255.255']);
+          for (const ad of info.adapters) {
+            if (ad.broadcastIp) targets.add(ad.broadcastIp);
+          }
+          for (const bcast of targets) {
+            udp.send(payload, port + 1, bcast, () => {});
+          }
+        };
+        announceBoot();
+        setTimeout(announceBoot, 3000).unref();
+        setTimeout(announceBoot, 8000).unref();
+      } catch {
+        // ignore
+      }
+    });
   } catch {
     // ignore
   }

@@ -14,6 +14,7 @@ import { execFile } from 'child_process';
 import { extractLargestPngFromIco } from './icons';
 import { startNexusServer, NexusServerHandle } from './server';
 import { DeckStore } from './store';
+import { runWindowsSystemSetup } from './system';
 import { PlatformAdapter, ShortcutDetails } from './types';
 
 let mainWindow: BrowserWindow | null = null;
@@ -36,6 +37,19 @@ if (!gotLock) {
 
 function getStartupExePath(): string {
   return process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+}
+
+function getWindowsStartupLnkPath(): string {
+  const appData = process.env.APPDATA || path.join(app.getPath('home'), 'AppData', 'Roaming');
+  return path.join(
+    appData,
+    'Microsoft',
+    'Windows',
+    'Start Menu',
+    'Programs',
+    'Startup',
+    'NEXUS PC.lnk'
+  );
 }
 
 function createElectronAdapter(): PlatformAdapter {
@@ -102,6 +116,9 @@ function createElectronAdapter(): PlatformAdapter {
     getAutostart: (): boolean => {
       if (process.platform !== 'win32' && process.platform !== 'darwin') return false;
       try {
+        if (process.platform === 'win32' && fs.existsSync(getWindowsStartupLnkPath())) {
+          return true;
+        }
         return app.getLoginItemSettings({
           path: getStartupExePath(),
           args: ['--hidden'],
@@ -119,9 +136,20 @@ function createElectronAdapter(): PlatformAdapter {
           path: exePath,
           args: ['--hidden'],
         });
-        // Register zero-delay Task Scheduler entry on Windows to bypass Windows 11 startup delay
         if (process.platform === 'win32') {
+          const lnkPath = getWindowsStartupLnkPath();
           if (enabled) {
+            try {
+              fs.mkdirSync(path.dirname(lnkPath), { recursive: true });
+              shell.writeShortcutLink(lnkPath, 'replace', {
+                target: exePath,
+                args: '--hidden',
+                cwd: path.dirname(exePath),
+                description: 'NEXUS PC Remote Host',
+              });
+            } catch {
+              // ignore shortcut error if folder restricted
+            }
             execFile(
               'schtasks.exe',
               ['/Create', '/TN', 'NEXUS_PC_Deck', '/TR', `"${exePath}" --hidden`, '/SC', 'ONLOGON', '/F'],
@@ -129,6 +157,11 @@ function createElectronAdapter(): PlatformAdapter {
               () => {}
             );
           } else {
+            try {
+              if (fs.existsSync(lnkPath)) fs.unlinkSync(lnkPath);
+            } catch {
+              // ignore
+            }
             execFile(
               'schtasks.exe',
               ['/Delete', '/TN', 'NEXUS_PC_Deck', '/F'],
@@ -302,9 +335,11 @@ app.whenReady().then(async () => {
   const adapter = createElectronAdapter();
   const store = new DeckStore(adapter);
 
-  // Enable autostart by default on first run on Windows so Wake-on-LAN works seamlessly!
-  if (process.platform === 'win32' && !store.getState().initialized) {
-    adapter.setAutostart(true);
+  // Enable autostart by default on first run AND refresh Startup shortcut path on upgrades
+  if (process.platform === 'win32') {
+    if (!store.getState().initialized || adapter.getAutostart()) {
+      adapter.setAutostart(true);
+    }
   }
 
   serverHandle = await startNexusServer(adapter, store);
@@ -313,6 +348,17 @@ app.whenReady().then(async () => {
 
   const startHidden = process.argv.includes('--hidden');
   createWindow(startHidden);
+
+  // Auto-configure Windows Firewall + Wake-on-LAN once on first launch so ports & exe are never blocked on reboot
+  if (process.platform === 'win32' && !store.getState().firewallConfigured) {
+    setTimeout(() => {
+      runWindowsSystemSetup(store.getState().port, getStartupExePath())
+        .then((res) => {
+          if (res.ok) store.markFirewallConfigured();
+        })
+        .catch(() => {});
+    }, 1200);
+  }
 });
 
 app.on('before-quit', async () => {

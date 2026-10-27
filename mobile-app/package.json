@@ -1,6 +1,6 @@
 {
   "name": "nexus-mobile-remote",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "NEXUS // MOBILE DECK — Android Remote Launcher & Wake-on-LAN Controller",
   "private": true,
   "scripts": {
