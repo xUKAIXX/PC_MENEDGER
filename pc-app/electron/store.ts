@@ -13,6 +13,7 @@ export interface PersistedState {
   items: DeckItem[];
   pairedDevices: PairedDevice[];
   initialized: boolean;
+  firewallConfigured: boolean;
 }
 
 export class DeckStore {
@@ -39,6 +40,7 @@ export class DeckStore {
           items: Array.isArray(raw.items) ? raw.items : [],
           pairedDevices: Array.isArray(raw.pairedDevices) ? raw.pairedDevices : [],
           initialized: Boolean(raw.initialized),
+          firewallConfigured: Boolean(raw.firewallConfigured),
         };
       }
     } catch {
@@ -52,6 +54,7 @@ export class DeckStore {
       items: [],
       pairedDevices: [],
       initialized: false,
+      firewallConfigured: false,
     };
   }
 
@@ -288,5 +291,12 @@ export class DeckStore {
     this.state.pairedDevices.push(dev);
     this.save();
     return dev;
+  }
+
+  public markFirewallConfigured(): void {
+    if (!this.state.firewallConfigured) {
+      this.state.firewallConfigured = true;
+      this.save();
+    }
   }
 }

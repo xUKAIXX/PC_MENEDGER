@@ -1,6 +1,6 @@
 {
   "name": "nexus-pc-manager",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "NEXUS // DECK — Desktop Host & Launcher for Android Remote Control",
   "author": "NEXUS",
   "private": true,
@@ -11,7 +11,7 @@
     "build:ui": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json",
     "build": "npm run build:ui && npm run build:electron",
-    "dist:win": "npm run build && electron-builder --win portable"
+    "dist:win": "npm run build && electron-builder --win nsis"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.1.0",
@@ -52,14 +52,20 @@
       "icon": "build/icon.ico",
       "target": [
         {
-          "target": "portable",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ]
     },
-    "portable": {
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
       "artifactName": "NEXUS-PC-Windows.exe"
     }
   }

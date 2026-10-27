@@ -1,6 +1,11 @@
 package com.nexusdeck.remote;
 
 import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.os.Build;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
@@ -11,7 +16,9 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.HttpURLConnection;
@@ -27,9 +34,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Enumeration;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -41,8 +50,49 @@ import org.json.JSONObject;
 @CapacitorPlugin(name = "WolLan")
 public class WolLanPlugin extends Plugin {
 
+    private final ExecutorService ioPool = Executors.newCachedThreadPool();
+
+    /**
+     * Finds the active physical Wi-Fi or Ethernet Network on Android, bypassing any active VPN tunnel (tun0).
+     */
+    private Network findPhysicalLanNetwork() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return null;
+            Network ethernetFallback = null;
+            for (Network net : cm.getAllNetworks()) {
+                NetworkCapabilities caps = cm.getNetworkCapabilities(net);
+                if (caps == null) continue;
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue;
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    return net;
+                }
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) {
+                    ethernetFallback = net;
+                }
+            }
+            return ethernetFallback;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean isTunnelOrCellularInterface(String name) {
+        if (name == null) return true;
+        String lower = name.toLowerCase(Locale.ROOT);
+        return lower.startsWith("tun")
+            || lower.startsWith("tap")
+            || lower.startsWith("ppp")
+            || lower.startsWith("wg")
+            || lower.startsWith("rmnet")
+            || lower.startsWith("ccmni")
+            || lower.startsWith("pdp")
+            || lower.startsWith("dummy")
+            || lower.startsWith("lo");
+    }
+
     private byte[] parseMac(String mac) {
-        String clean = mac.trim().replace("-", ":").toUpperCase();
+        String clean = mac.trim().replace("-", ":").toUpperCase(Locale.ROOT);
         String[] parts = clean.split(":");
         if (parts.length != 6) return null;
         byte[] bytes = new byte[6];
@@ -67,17 +117,40 @@ public class WolLanPlugin extends Plugin {
         return packet;
     }
 
-    private Set<String> collectBroadcastTargets(String hintBroadcast) {
+    private Set<String> collectBroadcastTargets(String hintBroadcast, Network lanNet) {
         Set<String> targets = new LinkedHashSet<>();
         targets.add("255.255.255.255");
         if (hintBroadcast != null && !hintBroadcast.trim().isEmpty()) {
             targets.add(hintBroadcast.trim());
         }
         try {
+            if (lanNet != null) {
+                ConnectivityManager cm = (ConnectivityManager) getContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) {
+                    LinkProperties lp = cm.getLinkProperties(lanNet);
+                    if (lp != null) {
+                        for (LinkAddress la : lp.getLinkAddresses()) {
+                            InetAddress addr = la.getAddress();
+                            if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
+                                String ip = addr.getHostAddress();
+                                if (ip != null) {
+                                    int dot = ip.lastIndexOf('.');
+                                    if (dot > 0) {
+                                        targets.add(ip.substring(0, dot + 1) + "255");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        try {
             Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
             while (ifaces != null && ifaces.hasMoreElements()) {
                 NetworkInterface ni = ifaces.nextElement();
-                if (!ni.isUp() || ni.isLoopback()) continue;
+                if (!ni.isUp() || ni.isLoopback() || isTunnelOrCellularInterface(ni.getName())) continue;
                 for (InterfaceAddress ia : ni.getInterfaceAddresses()) {
                     InetAddress bcast = ia.getBroadcast();
                     if (bcast != null) {
@@ -89,13 +162,39 @@ public class WolLanPlugin extends Plugin {
         return targets;
     }
 
-    private List<String> getLocalIpv4Prefixes() {
-        List<String> prefixes = new ArrayList<>();
+    private List<String> getLocalIpv4Prefixes(Network lanNet) {
+        Set<String> prefixes = new LinkedHashSet<>();
+
+        // 1. Prefer Wi-Fi / Ethernet LinkProperties directly (never confused by VPN tun0!)
+        try {
+            if (lanNet != null) {
+                ConnectivityManager cm = (ConnectivityManager) getContext().getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) {
+                    LinkProperties lp = cm.getLinkProperties(lanNet);
+                    if (lp != null) {
+                        for (LinkAddress la : lp.getLinkAddresses()) {
+                            InetAddress addr = la.getAddress();
+                            if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
+                                String ip = addr.getHostAddress();
+                                if (ip != null && !ip.startsWith("169.254.")) {
+                                    int lastDot = ip.lastIndexOf('.');
+                                    if (lastDot > 0) {
+                                        prefixes.add(ip.substring(0, lastDot + 1));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // 2. Also inspect non-VPN, non-cellular NetworkInterfaces (e.g. Wi-Fi Hotspot ap0/wlan1)
         try {
             Enumeration<NetworkInterface> ifaces = NetworkInterface.getNetworkInterfaces();
             while (ifaces != null && ifaces.hasMoreElements()) {
                 NetworkInterface ni = ifaces.nextElement();
-                if (!ni.isUp() || ni.isLoopback()) continue;
+                if (!ni.isUp() || ni.isLoopback() || isTunnelOrCellularInterface(ni.getName())) continue;
                 Enumeration<InetAddress> addrs = ni.getInetAddresses();
                 while (addrs.hasMoreElements()) {
                     InetAddress addr = addrs.nextElement();
@@ -104,17 +203,131 @@ public class WolLanPlugin extends Plugin {
                         if (ip != null && !ip.startsWith("169.254.")) {
                             int lastDot = ip.lastIndexOf('.');
                             if (lastDot > 0) {
-                                String prefix = ip.substring(0, lastDot + 1);
-                                if (!prefixes.contains(prefix)) {
-                                    prefixes.add(prefix);
-                                }
+                                prefixes.add(ip.substring(0, lastDot + 1));
                             }
                         }
                     }
                 }
             }
         } catch (Exception ignored) {}
-        return prefixes;
+
+        return new ArrayList<>(prefixes);
+    }
+
+    private HttpURLConnection openHttpConnectionSmart(URL url, Network lanNet, String method, int timeoutMs) throws Exception {
+        HttpURLConnection conn;
+        if (lanNet != null) {
+            try {
+                conn = (HttpURLConnection) lanNet.openConnection(url);
+            } catch (Exception e) {
+                conn = (HttpURLConnection) url.openConnection();
+            }
+        } else {
+            conn = (HttpURLConnection) url.openConnection();
+        }
+        String safeMethod = "PATCH".equalsIgnoreCase(method) ? "PUT" : method.toUpperCase(Locale.ROOT);
+        conn.setRequestMethod(safeMethod);
+        conn.setConnectTimeout(timeoutMs);
+        conn.setReadTimeout(timeoutMs);
+        conn.setUseCaches(false);
+        return conn;
+    }
+
+    private String readStreamUtf8(InputStream is) throws Exception {
+        if (is == null) return "";
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            char[] buf = new char[4096];
+            int n;
+            while ((n = br.read(buf)) != -1) {
+                sb.append(buf, 0, n);
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Native HTTP client bound directly to physical Wi-Fi/LAN (bypasses Android VPN & WebView restrictions!)
+     */
+    @PluginMethod
+    public void httpRequest(PluginCall call) {
+        final String urlStr = call.getString("url");
+        if (urlStr == null || urlStr.trim().isEmpty()) {
+            call.reject("url required");
+            return;
+        }
+        final String method = call.getString("method", "GET");
+        final JSObject headersObj = call.getObject("headers");
+        final String body = call.getString("body", null);
+        Integer timeoutArg = call.getInt("timeoutMs", 5000);
+        final int timeoutMs = timeoutArg != null ? Math.max(800, timeoutArg) : 5000;
+
+        ioPool.submit(() -> {
+            Network lanNet = findPhysicalLanNetwork();
+            HttpURLConnection conn = null;
+            try {
+                URL url = new URL(urlStr);
+                try {
+                    conn = openHttpConnectionSmart(url, lanNet, method != null ? method : "GET", timeoutMs);
+                    applyHeadersAndBody(conn, headersObj, body);
+                    int status = conn.getResponseCode();
+                    InputStream stream = status >= 200 && status < 400 ? conn.getInputStream() : conn.getErrorStream();
+                    String responseText = readStreamUtf8(stream);
+
+                    JSObject res = new JSObject();
+                    res.put("status", status);
+                    res.put("data", responseText);
+                    call.resolve(res);
+                    return;
+                } catch (Exception firstErr) {
+                    if (conn != null) {
+                        conn.disconnect();
+                        conn = null;
+                    }
+                    // Fallback to system default network if user is intentionally on a remote WireGuard/Tailscale VPN
+                    if (lanNet != null) {
+                        conn = openHttpConnectionSmart(url, null, method != null ? method : "GET", timeoutMs);
+                        applyHeadersAndBody(conn, headersObj, body);
+                        int status = conn.getResponseCode();
+                        InputStream stream = status >= 200 && status < 400 ? conn.getInputStream() : conn.getErrorStream();
+                        String responseText = readStreamUtf8(stream);
+
+                        JSObject res = new JSObject();
+                        res.put("status", status);
+                        res.put("data", responseText);
+                        call.resolve(res);
+                        return;
+                    }
+                    throw firstErr;
+                }
+            } catch (Exception e) {
+                call.reject(e.getMessage() != null ? e.getMessage() : "Network error");
+            } finally {
+                if (conn != null) conn.disconnect();
+            }
+        });
+    }
+
+    private void applyHeadersAndBody(HttpURLConnection conn, JSObject headersObj, String body) throws Exception {
+        if (headersObj != null) {
+            Iterator<String> keys = headersObj.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                String v = headersObj.optString(k, "");
+                if (!v.isEmpty()) {
+                    conn.setRequestProperty(k, v);
+                }
+            }
+        }
+        if (body != null && !body.isEmpty()) {
+            conn.setDoOutput(true);
+            byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+            conn.setFixedLengthStreamingMode(bytes.length);
+            try (OutputStream os = conn.getOutputStream()) {
+                os.write(bytes);
+                os.flush();
+            }
+        }
     }
 
     @PluginMethod
@@ -127,12 +340,18 @@ public class WolLanPlugin extends Plugin {
             return;
         }
 
-        new Thread(() -> {
+        ioPool.submit(() -> {
             int sentCount = 0;
-            Set<String> targets = collectBroadcastTargets(broadcastIp);
+            Network lanNet = findPhysicalLanNetwork();
+            Set<String> targets = collectBroadcastTargets(broadcastIp, lanNet);
             int[] ports = new int[] { 9, 7 };
 
             try (DatagramSocket socket = new DatagramSocket()) {
+                if (lanNet != null) {
+                    try {
+                        lanNet.bindSocket(socket);
+                    } catch (Exception ignored) {}
+                }
                 socket.setBroadcast(true);
 
                 for (int attempt = 0; attempt < 3; attempt++) {
@@ -166,7 +385,7 @@ public class WolLanPlugin extends Plugin {
             } catch (Exception e) {
                 call.reject("Wake-on-LAN socket error: " + e.getMessage());
             }
-        }).start();
+        });
     }
 
     private JSObject parseDiscoveredJson(JSONObject obj, String fallbackIp, int defaultPort) {
@@ -205,23 +424,29 @@ public class WolLanPlugin extends Plugin {
         final int httpPort = portArg != null ? portArg : 7788;
         final int udpPort = httpPort + 1;
 
-        new Thread(() -> {
+        ioPool.submit(() -> {
+            final Network lanNet = findPhysicalLanNetwork();
             Map<String, JSObject> foundMap = Collections.synchronizedMap(new LinkedHashMap<>());
 
-            // Phase 1: Instant UDP Broadcast Discovery (port 7789)
+            // Phase 1: Instant UDP Broadcast Discovery over physical Wi-Fi (port 7789)
             try (DatagramSocket udp = new DatagramSocket()) {
+                if (lanNet != null) {
+                    try {
+                        lanNet.bindSocket(udp);
+                    } catch (Exception ignored) {}
+                }
                 udp.setBroadcast(true);
                 udp.setSoTimeout(380);
                 byte[] probe = "NEXUS_DISCOVER_V1".getBytes(StandardCharsets.UTF_8);
 
-                for (String target : collectBroadcastTargets(null)) {
+                for (String target : collectBroadcastTargets(null, lanNet)) {
                     try {
                         InetAddress addr = InetAddress.getByName(target);
                         udp.send(new DatagramPacket(probe, probe.length, addr, udpPort));
                     } catch (Exception ignored) {}
                 }
 
-                long deadline = System.currentTimeMillis() + 420;
+                long deadline = System.currentTimeMillis() + 450;
                 byte[] recvBuf = new byte[4096];
                 while (System.currentTimeMillis() < deadline) {
                     try {
@@ -240,16 +465,15 @@ public class WolLanPlugin extends Plugin {
                 }
             } catch (Exception ignored) {}
 
-            // Phase 2: Fast parallel /24 TCP sweep fallback if router blocked UDP broadcast
+            // Phase 2: Parallel /24 TCP sweep over physical Wi-Fi (bypasses VPN & routers blocking UDP broadcast)
             if (foundMap.isEmpty()) {
-                List<String> prefixes = getLocalIpv4Prefixes();
-                if (!prefixes.isEmpty()) {
-                    String prefix = prefixes.get(0);
-                    ExecutorService pool = Executors.newFixedThreadPool(48);
+                List<String> prefixes = getLocalIpv4Prefixes(lanNet);
+                for (String prefix : prefixes) {
+                    ExecutorService pool = Executors.newFixedThreadPool(56);
                     for (int hostNum = 1; hostNum <= 254; hostNum++) {
                         final String candidateIp = prefix + hostNum;
                         pool.submit(() -> {
-                            try (Socket sock = new Socket()) {
+                            try (Socket sock = (lanNet != null ? lanNet.getSocketFactory().createSocket() : new Socket())) {
                                 sock.connect(new InetSocketAddress(candidateIp, httpPort), 260);
                             } catch (Exception e) {
                                 return;
@@ -257,21 +481,10 @@ public class WolLanPlugin extends Plugin {
                             HttpURLConnection conn = null;
                             try {
                                 URL url = new URL("http://" + candidateIp + ":" + httpPort + "/api/ping");
-                                conn = (HttpURLConnection) url.openConnection();
-                                conn.setConnectTimeout(600);
-                                conn.setReadTimeout(700);
-                                conn.setRequestMethod("GET");
+                                conn = openHttpConnectionSmart(url, lanNet, "GET", 650);
                                 if (conn.getResponseCode() == 200) {
-                                    StringBuilder sb = new StringBuilder();
-                                    try (BufferedReader br = new BufferedReader(
-                                        new InputStreamReader(conn.getInputStream(), StandardCharsets.UTF_8)
-                                    )) {
-                                        String line;
-                                        while ((line = br.readLine()) != null) {
-                                            sb.append(line);
-                                        }
-                                    }
-                                    JSONObject json = new JSONObject(sb.toString());
+                                    String text = readStreamUtf8(conn.getInputStream());
+                                    JSONObject json = new JSONObject(text);
                                     JSObject parsed = parseDiscoveredJson(json, candidateIp, httpPort);
                                     if (parsed != null) {
                                         foundMap.put(candidateIp, parsed);
@@ -285,8 +498,9 @@ public class WolLanPlugin extends Plugin {
                     }
                     pool.shutdown();
                     try {
-                        pool.awaitTermination(2800, TimeUnit.MILLISECONDS);
+                        pool.awaitTermination(2500, TimeUnit.MILLISECONDS);
                     } catch (InterruptedException ignored) {}
+                    if (!foundMap.isEmpty()) break;
                 }
             }
 
@@ -297,7 +511,7 @@ public class WolLanPlugin extends Plugin {
             JSObject result = new JSObject();
             result.put("hosts", hostsArray);
             call.resolve(result);
-        }).start();
+        });
     }
 
     @PluginMethod

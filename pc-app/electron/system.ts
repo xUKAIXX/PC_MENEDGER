@@ -430,20 +430,32 @@ export async function executeControlAction(
 }
 
 /**
- * 1-Click Windows Setup: Opens Firewall ports (TCP 7788 + UDP 7789 + UDP 9)
- * AND configures network adapters for Wake-on-LAN + disables Windows Fast Startup (Hiberboot)
+ * 1-Click Windows Setup: Removes any Defender Block rules, opens Firewall for Program + Ports
+ * across all profiles (Public/Private/Domain), registers zero-delay Logon Scheduled Task,
+ * configures Wake-on-LAN on network adapters, and disables Fast Startup (Hiberboot).
  */
-export function runWindowsSystemSetup(port: number): Promise<{ ok: boolean; error?: string }> {
+export function runWindowsSystemSetup(
+  port: number,
+  exePath = process.execPath
+): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
     if (process.platform !== 'win32') {
       resolve({ ok: true });
       return;
     }
+
+    const cleanExe = exePath.replace(/'/g, "''");
     const psScript = [
-      `netsh advfirewall firewall delete rule name="NEXUS PC Manager" | Out-Null`,
-      `netsh advfirewall firewall add rule name="NEXUS PC Manager" dir=in action=allow protocol=TCP localport=${port} profile=any | Out-Null`,
-      `netsh advfirewall firewall add rule name="NEXUS PC Manager" dir=in action=allow protocol=UDP localport=${port + 1},9,7 profile=any | Out-Null`,
-      `Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { Enable-NetAdapterPowerManagement -Name $_.Name -WakeOnMagicPacket -ErrorAction SilentlyContinue }`,
+      `Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -match 'NEXUS|nexus-pc' } | Remove-NetFirewallRule -ErrorAction SilentlyContinue`,
+      `New-NetFirewallRule -DisplayName 'NEXUS PC App (Inbound)' -Direction Inbound -Action Allow -Program '${cleanExe}' -Profile Any -ErrorAction SilentlyContinue | Out-Null`,
+      `New-NetFirewallRule -DisplayName 'NEXUS PC App (Outbound)' -Direction Outbound -Action Allow -Program '${cleanExe}' -Profile Any -ErrorAction SilentlyContinue | Out-Null`,
+      `New-NetFirewallRule -DisplayName 'NEXUS PC Port TCP' -Direction Inbound -Action Allow -Protocol TCP -LocalPort ${port} -Profile Any -ErrorAction SilentlyContinue | Out-Null`,
+      `New-NetFirewallRule -DisplayName 'NEXUS PC Port UDP' -Direction Inbound -Action Allow -Protocol UDP -LocalPort ${port + 1},9,7 -Profile Any -ErrorAction SilentlyContinue | Out-Null`,
+      `$act = New-ScheduledTaskAction -Execute '${cleanExe}' -Argument '--hidden'`,
+      `$trg = New-ScheduledTaskTrigger -AtLogOn`,
+      `$stg = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)`,
+      `Register-ScheduledTask -TaskName 'NEXUS_PC_Deck' -Action $act -Trigger $trg -Settings $stg -Force -ErrorAction SilentlyContinue | Out-Null`,
+      `Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { Enable-NetAdapterPowerManagement -Name $_.Name -WakeOnMagicPacket -ErrorAction SilentlyContinue }`,
       `Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power' -Name 'HiberbootEnabled' -Value 0 -Type DWord -ErrorAction SilentlyContinue`,
     ].join('; ');
 

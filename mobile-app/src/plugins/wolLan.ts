@@ -1,7 +1,19 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { DiscoveredPc } from '../types';
 
+export interface NativeHttpOptions {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  timeoutMs?: number;
+}
+
 export interface WolLanPluginInterface {
+  httpRequest(options: NativeHttpOptions): Promise<{
+    status: number;
+    data: string;
+  }>;
   wake(options: { macs: string[]; broadcastIp?: string }): Promise<{
     sentCount: number;
   }>;
@@ -12,6 +24,13 @@ export interface WolLanPluginInterface {
 }
 
 const NativeWolLan = registerPlugin<WolLanPluginInterface>('WolLan');
+
+export async function nativeLanHttpRequest(options: NativeHttpOptions): Promise<{
+  status: number;
+  data: string;
+}> {
+  return NativeWolLan.httpRequest(options);
+}
 
 export async function triggerHaptic(durationMs = 18): Promise<void> {
   try {
@@ -41,7 +60,8 @@ export async function sendWakeOnLan(
     return {
       ok: false,
       sentCount: 0,
-      error: 'Сначала подключитесь к включённому ПК 1 раз (MAC сохранится автоматически) или укажите MAC вручную.',
+      error:
+        'Сначала подключитесь к включённому ПК 1 раз (MAC сохранится автоматически) или укажите MAC вручную.',
     };
   }
 
@@ -54,7 +74,6 @@ export async function sendWakeOnLan(
     }
   }
 
-  // Web preview simulation response
   return { ok: true, sentCount: cleanMacs.length * 3 };
 }
 
@@ -68,7 +87,6 @@ export async function discoverPcsOnWifi(port = 7788): Promise<DiscoveredPc[]> {
     }
   }
 
-  // Browser preview fallback: check proxied /api/ping
   try {
     const res = await fetch('/api/ping');
     if (res.ok) {

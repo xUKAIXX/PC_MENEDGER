@@ -212,36 +212,50 @@ export const App: React.FC = () => {
 
     let failedPings = 0;
     let searchingLan = false;
+    let checkInFlight = false;
 
     const checkHttpStatus = async () => {
-      if (disposed) return;
+      if (disposed || checkInFlight) return;
+      checkInFlight = true;
+      const t0 = performance.now();
       try {
-        const pingRes = await mobilePcApi.ping(activePc.ip, activePc.port);
+        const st = await mobilePcApi.getState(activePc);
         if (disposed) return;
         failedPings = 0;
-        setLatencyMs(pingRes.latencyMs);
-        markOnlineAndUpdateProfile(pingRes.info);
+        setLatencyMs(Math.max(1, Math.round(performance.now() - t0)));
+        markOnlineAndUpdateProfile(st.pcInfo);
+        setStats(st.stats);
+        setItems(st.items);
+        saveCachedItemsForPc(activePc.id, st.items);
+        setRunningIds(new Set(st.runningIds || []));
+        setShutdownTimerEndsAt(st.shutdownTimerEndsAt || null);
       } catch {
         if (disposed) return;
         setIsOnline(false);
         failedPings += 1;
 
-        // Auto-heal IP if router reassigned DHCP IP after cold boot!
-        if (!searchingLan && failedPings % 3 === 0) {
+        // Immediately scan Wi-Fi on 1st failure & every 2nd failure to auto-heal DHCP IP changes!
+        if (!searchingLan && (failedPings === 1 || failedPings % 2 === 1)) {
           searchingLan = true;
           discoverPcsOnWifi(activePc.port)
             .then((hosts) => {
               if (disposed) return;
-              const matched = hosts.find(
-                (h) =>
-                  h.serverId === activePc.id ||
-                  (activePc.mac &&
-                    (h.mac === activePc.mac || h.macs?.includes(activePc.mac)))
-              );
+              const matched =
+                hosts.find(
+                  (h) =>
+                    h.serverId === activePc.id ||
+                    (activePc.mac &&
+                      (h.mac === activePc.mac || h.macs?.includes(activePc.mac))) ||
+                    h.name.toLowerCase() === activePc.name.toLowerCase()
+                ) || (hosts.length === 1 ? hosts[0] : undefined);
+
               if (matched && matched.ip && matched.ip !== activePc.ip) {
                 const updatedList = upsertSavedPc({
                   ...activePc,
+                  id: matched.serverId || activePc.id,
                   ip: matched.ip,
+                  mac: matched.mac || activePc.mac,
+                  macs: matched.macs?.length ? matched.macs : activePc.macs,
                   broadcastIp: matched.broadcastIp || activePc.broadcastIp,
                   lastSeenAt: Date.now(),
                 });
@@ -253,6 +267,8 @@ export const App: React.FC = () => {
               searchingLan = false;
             });
         }
+      } finally {
+        checkInFlight = false;
       }
     };
 
@@ -291,28 +307,38 @@ export const App: React.FC = () => {
         };
         ws.onclose = () => {
           if (!disposed) {
-            wsRetryTimer = window.setTimeout(connectWs, 2200);
+            wsRetryTimer = window.setTimeout(connectWs, 3000);
           }
         };
         ws.onerror = () => {
           ws?.close();
         };
       } catch {
-        wsRetryTimer = window.setTimeout(connectWs, 2500);
+        wsRetryTimer = window.setTimeout(connectWs, 3000);
+      }
+    };
+
+    const handleResume = () => {
+      if (document.visibilityState === 'visible') {
+        checkHttpStatus();
       }
     };
 
     checkHttpStatus();
     connectWs();
-    pingInterval = window.setInterval(checkHttpStatus, wakingStartedAt ? 1500 : 4000);
+    pingInterval = window.setInterval(checkHttpStatus, wakingStartedAt ? 1400 : 2500);
+    document.addEventListener('visibilitychange', handleResume);
+    window.addEventListener('focus', checkHttpStatus);
 
     return () => {
       disposed = true;
+      document.removeEventListener('visibilitychange', handleResume);
+      window.removeEventListener('focus', checkHttpStatus);
       if (wsRetryTimer) window.clearTimeout(wsRetryTimer);
       if (pingInterval) window.clearInterval(pingInterval);
       ws?.close();
     };
-  }, [activePc?.id, activePc?.ip, activePc?.port, Boolean(wakingStartedAt)]);
+  }, [activePc?.id, activePc?.ip, activePc?.port, activePc?.pin, Boolean(wakingStartedAt)]);
 
   // Boot radar timer counter (up to 120s for slow BIOS / DDR5 cold boots + retry WoL at 7s)
   useEffect(() => {

@@ -1,3 +1,5 @@
+import { Capacitor } from '@capacitor/core';
+import { nativeLanHttpRequest } from '../plugins/wolLan';
 import {
   ControlAction,
   DeckItem,
@@ -28,17 +30,37 @@ async function fetchJson<T>(
   init?: RequestInit,
   timeoutMs = 5000
 ): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((init?.headers as Record<string, string>) || {}),
+  };
+  if (pc.pin) {
+    headers['X-Nexus-Pin'] = pc.pin;
+  }
+
+  const fullUrl = `${getHttpBase(pc)}${path}`;
+
+  if (Capacitor.isNativePlatform() && pc.ip !== 'preview') {
+    const method = (init?.method || 'GET').toUpperCase();
+    const body = typeof init?.body === 'string' ? init.body : undefined;
+    const res = await nativeLanHttpRequest({
+      url: fullUrl,
+      method,
+      headers,
+      body,
+      timeoutMs,
+    });
+    const data = JSON.parse(res.data || '{}');
+    if (res.status < 200 || res.status >= 300 || data.ok === false) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    return data as T;
+  }
+
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...((init?.headers as Record<string, string>) || {}),
-    };
-    if (pc.pin) {
-      headers['X-Nexus-Pin'] = pc.pin;
-    }
-    const res = await fetch(`${getHttpBase(pc)}${path}`, {
+    const res = await fetch(fullUrl, {
       ...init,
       headers,
       signal: controller.signal,
@@ -55,33 +77,50 @@ async function fetchJson<T>(
 
 export const mobilePcApi = {
   ping: async (ip: string, port = 7788) => {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 2200);
     const t0 = performance.now();
-    try {
-      const base = ip === 'preview' ? '' : `http://${ip}:${port}`;
-      const res = await fetch(`${base}/api/ping`, { signal: controller.signal });
-      const data = await res.json();
-      if (!res.ok || data.magic !== 'NEXUS_PC_V1') {
-        throw new Error('Не найден сервер NEXUS на этом адресе');
+    const base = ip === 'preview' ? '' : `http://${ip}:${port}`;
+    const url = `${base}/api/ping`;
+
+    let data: any;
+    if (Capacitor.isNativePlatform() && ip !== 'preview') {
+      const res = await nativeLanHttpRequest({
+        url,
+        method: 'GET',
+        timeoutMs: 2200,
+      });
+      if (res.status !== 200) {
+        throw new Error(`HTTP ${res.status}`);
       }
-      return {
-        latencyMs: Math.max(1, Math.round(performance.now() - t0)),
-        info: data as {
-          serverId: string;
-          name: string;
-          hostname: string;
-          primaryIp: string;
-          broadcastIp: string;
-          primaryMac: string;
-          macs: string[];
-          port: number;
-          pinRequired: boolean;
-        },
-      };
-    } finally {
-      window.clearTimeout(timer);
+      data = JSON.parse(res.data || '{}');
+    } else {
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 2200);
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        data = await res.json();
+      } finally {
+        window.clearTimeout(timer);
+      }
     }
+
+    if (data?.magic !== 'NEXUS_PC_V1') {
+      throw new Error('Не найден сервер NEXUS на этом адресе');
+    }
+
+    return {
+      latencyMs: Math.max(1, Math.round(performance.now() - t0)),
+      info: data as {
+        serverId: string;
+        name: string;
+        hostname: string;
+        primaryIp: string;
+        broadcastIp: string;
+        primaryMac: string;
+        macs: string[];
+        port: number;
+        pinRequired: boolean;
+      },
+    };
   },
 
   pair: (ip: string, port: number, pin?: string, deviceName = 'Android NEXUS') => {
@@ -134,7 +173,7 @@ export const mobilePcApi = {
       items: DeckItem[];
       runningIds: string[];
       shutdownTimerEndsAt: number | null;
-    }>(pc, '/api/state', undefined, 3500),
+    }>(pc, '/api/state', undefined, 3200),
 
   launch: (pc: SavedPcProfile, itemId: string) =>
     fetchJson<{ ok: true; item: DeckItem }>(
@@ -195,7 +234,7 @@ export const mobilePcApi = {
       pc,
       `/api/items/${encodeURIComponent(id)}`,
       {
-        method: 'PATCH',
+        method: 'PUT',
         body: JSON.stringify(patch),
       },
       8000
